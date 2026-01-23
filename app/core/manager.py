@@ -1,17 +1,35 @@
 from fastapi import WebSocket
+from typing import Dict
 
 # Connection Manager for WebSocket connections
 
 class ConnectionManager:
     def __init__(self):
-        self.active_connections: dict[WebSocket, str] = {}
+        # room_name -> {WebSocket: user_info}
+        self.rooms: Dict[str, Dict[WebSocket, dict]] = {}
 
-    async def connect(self, websocket: WebSocket, username: str):
+    async def connect(self, websocket: WebSocket, room: str, user: dict):
         await websocket.accept()
 
-    def disconnect(self, websocket: WebSocket):
-        self.active_connections.pop(websocket, None)
+        if room not in self.rooms:
+            self.rooms[room] = {}
 
-    async def broadcast(self, message: str):
-        for ws in self.active_connections:
-            await ws.send_text(message)
+        self.rooms[room][websocket] = user
+
+    # Disconnect a WebSocket from a room    
+
+    def disconnect(self, websocket: WebSocket, room: str):
+        if room in self.rooms and websocket in self.rooms[room]:
+            del self.rooms[room][websocket]
+
+            if not self.rooms[room]:
+                del self.rooms[room]
+
+    # Broadcast a message to all WebSockets in a room
+
+    async def broadcast(self, room: str, message: dict):
+        if room not in self.rooms:
+            return
+        
+        for websocket in self.rooms[room]:
+            await websocket.sendjson(message)
