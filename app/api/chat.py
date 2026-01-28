@@ -1,94 +1,88 @@
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
-from app.core.security import verify_token  # Your JWT verification function
+# app/api/chat.py
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends
+from sqlalchemy.orm import Session
+from app.database import get_db
+from app.models.message import Message
+from app.core.security import verify_token  # your JWT verification function
 
-# Create a router with /chat prefix
 router = APIRouter(prefix="/chat", tags=["Chat"])
 
-# ----------------------------------------
-# ConnectionManager: handles WebSocket connections per room
-# ----------------------------------------
+# ----------------------------
+# ConnectionManager for WebSocket rooms
+# ----------------------------
 class ConnectionManager:
     def __init__(self):
-        """
-        Dictionary mapping room names to a list of active WebSocket connections.
-        Example:
-            {
-                "general": [ws1, ws2],
-                "random": [ws3]
-            }
-        """
         self.active_connections: dict[str, list[WebSocket]] = {}
 
     async def connect(self, websocket: WebSocket, room: str):
-        """Accept WebSocket connection and add it to the specified room"""
         await websocket.accept()
         if room not in self.active_connections:
             self.active_connections[room] = []
         self.active_connections[room].append(websocket)
 
     def disconnect(self, websocket: WebSocket, room: str):
-        """Remove WebSocket connection from the specified room"""
         if room in self.active_connections and websocket in self.active_connections[room]:
             self.active_connections[room].remove(websocket)
 
     async def broadcast(self, room: str, message: dict):
-        """
-        Broadcast a message to all clients in the specified room.
-        Message is sent as JSON for better structure (room, sender, message).
-        """
         for connection in self.active_connections.get(room, []):
-            await connection.send_json(message)
+            try:
+                await connection.send_json(message)
+            except:
+                pass  # fail gracefully if WS is closed
 
-# Instantiate a single manager to track all rooms
 manager = ConnectionManager()
 
-# ----------------------------------------
-# Secure WebSocket endpoint
-# ----------------------------------------
+# ----------------------------
+# WebSocket endpoint
+# ----------------------------
 @router.websocket("/ws")
-async def chat_ws(websocket: WebSocket, room: str = Query(...)):
-    """
-    WebSocket endpoint for a chat room.
-    Requires a JWT token in the "Authorization" header.
-    Query Parameter:
-        - room: name of the chat room
-    """
-
-    # Extract JWT token from headers
+async def chat_ws(websocket: WebSocket, room: str, db: Session = Depends(get_db)):
+    # Extract JWT from header
     auth_header = websocket.headers.get("Authorization")
-
-
-    if not auth_header or not auth_header.startswith("Bearer "):        # Close connection if no token provided
-        await websocket.close(code=1008)  # Policy violation
-        return
-    
-    token = auth_header.split(" ")[1]
-
-    # Verify token and get user info
-    user = verify_token(token)
-    if not user:
-        # Close connection if token is invalid
+    if not auth_header or not auth_header.startswith("Bearer "):
+        await websocket.accept()
+        await websocket.send_json({"error": "Missing or invalid Authorization header"})
         await websocket.close(code=1008)
         return
 
-    # Add client to the room
+    token = auth_header.split(" ")[1]
+    user = verify_token(token)
+    if not user:
+        await websocket.accept()
+        await websocket.send_json({"error": "Invalid token"})
+        await websocket.close(code=1008)
+        return
+
+    # Connect WebSocket to room
     await manager.connect(websocket, room)
+    await websocket.send_json({"info": f"Connected as {user} to room '{room}'"})
 
     try:
         while True:
-            # Wait for message from client
             data = await websocket.receive_text()
 
-            # Prepare message payload
-            message = {
-                "room": room,
-                "sender": user["username"],
-                "message": data,
-            }
+            # Save message to DB
+            try:
+                db_message = Message(
+                    username=user,
+                    user_id=0,
+                    content=data,
+                    room=room
+                )
+                db.add(db_message)
+                db.commit()
+            except Exception as e:
+                await websocket.send_json({"error": f"DB error: {str(e)}"})
+                continue
 
-            # Broadcast message to all clients in the same room
-            await manager.broadcast(room, message)
+            # Broadcast to room
+            await manager.broadcast(room, {
+                "room": room,
+                "sender": user,
+                "message": data
+            })
 
     except WebSocketDisconnect:
-        # Remove client when they disconnect
         manager.disconnect(websocket, room)
+        await manager.broadcast(room, {"info": f"{user} left the room"})

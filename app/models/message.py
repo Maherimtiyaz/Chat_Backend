@@ -1,5 +1,7 @@
+# app/models/message.py
 from sqlalchemy import Column, Integer, String, ForeignKey, DateTime
 from datetime import datetime
+from sqlalchemy.orm import relationship
 from app.database import Base
 
 class Message(Base):
@@ -11,4 +13,9 @@ class Message(Base):
     username = Column(String, nullable=False)
     content = Column(String, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+    # Optional relationship to User
+    # Only if you have User model and back_populates
+    # user = relationship("User", back_populates="messages")
+
 

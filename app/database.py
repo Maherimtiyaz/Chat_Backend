@@ -1,9 +1,14 @@
 from sqlalchemy import create_engine
 from sqlalchemy.orm import declarative_base, sessionmaker
+from dotenv import load_dotenv
+import os
 
-# PostgreSQL connection URL
-# Update with your actual credentials and database name
-DATABASE_URL = "postgresql://chat_user:chat_pass@localhost:5432/chat_backend"
+load_dotenv()
+
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+
+# PostgresSQL connection
 
 engine = create_engine(DATABASE_URL)
 Session = sessionmaker(autocommit=False, autoflush=False, bind=engine)
