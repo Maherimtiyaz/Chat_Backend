@@ -26,14 +26,13 @@ A learning-focused real-time chat application built with FastAPI, WebSockets, JW
 ## Running the Project
 
 ### Backend
-```bash
-uvicorn app.main:app --reload
-### Frontend
-```bash
-streamlit run app.py
 ## Run Locally
 ```bash
 python -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 uvicorn app.main:app --reload
+
+### Frontend
+```bash
+streamlit run app.py
