@@ -3,9 +3,11 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models.message import Message
-from app.core.security import verify_token  # your JWT verification function
+from app.core.security import verify_token
+import json  # ✅ CHANGE
 
 router = APIRouter(prefix="/chat", tags=["Chat"])
+
 
 # ----------------------------
 # ConnectionManager for WebSocket rooms
@@ -29,16 +31,20 @@ class ConnectionManager:
             try:
                 await connection.send_json(message)
             except:
-                pass  # fail gracefully if WS is closed
+                pass  # fail gracefully
+
 
 manager = ConnectionManager()
+
 
 # ----------------------------
 # WebSocket endpoint
 # ----------------------------
 @router.websocket("/ws")
 async def chat_ws(websocket: WebSocket, room: str, db: Session = Depends(get_db)):
-    # Extract JWT from header
+    # ----------------------------
+    # JWT validation (UNCHANGED)
+    # ----------------------------
     auth_header = websocket.headers.get("Authorization")
     if not auth_header or not auth_header.startswith("Bearer "):
         await websocket.accept()
@@ -54,20 +60,35 @@ async def chat_ws(websocket: WebSocket, room: str, db: Session = Depends(get_db)
         await websocket.close(code=1008)
         return
 
-    # Connect WebSocket to room
+    # ----------------------------
+    # Connect WebSocket
+    # ----------------------------
     await manager.connect(websocket, room)
     await websocket.send_json({"info": f"Connected as {user} to room '{room}'"})
 
     try:
         while True:
-            data = await websocket.receive_text()
+            raw_data = await websocket.receive_text()
 
-            # Save message to DB
+            # ✅ CHANGE 1: Parse JSON safely
+            try:
+                payload = json.loads(raw_data)
+                content = payload.get("content")
+            except json.JSONDecodeError:
+                # allow plain text fallback
+                content = raw_data
+
+            if not content:
+                continue
+
+            # ----------------------------
+            # Save CLEAN message to DB
+            # ----------------------------
             try:
                 db_message = Message(
                     username=user,
                     user_id=0,
-                    content=data,
+                    content=content,  # ✅ CHANGE 2: store clean text
                     room=room
                 )
                 db.add(db_message)
@@ -76,11 +97,13 @@ async def chat_ws(websocket: WebSocket, room: str, db: Session = Depends(get_db)
                 await websocket.send_json({"error": f"DB error: {str(e)}"})
                 continue
 
-            # Broadcast to room
+            # ----------------------------
+            # Broadcast CLEAN payload
+            # ----------------------------
             await manager.broadcast(room, {
                 "room": room,
                 "sender": user,
-                "message": data
+                "content": content  # ✅ CHANGE 3: consistent key
             })
 
     except WebSocketDisconnect:

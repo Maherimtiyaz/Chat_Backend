@@ -1,17 +1,20 @@
 import streamlit as st
+import requests
 import websocket
-import threading
 import json
+import threading
+import queue
 import time
 
-st.set_page_config(page_title="Chat Client", layout="centered")
-st.title("💬 Real-Time Chat")
+API_BASE = "http://127.0.0.1:8000"
+WS_URL = "ws://127.0.0.1:8000/chat/ws?room=general"
 
-# ----------------------------
-# Session state initialization
-# ----------------------------
-if "messages" not in st.session_state:
-    st.session_state.messages = []
+
+# -----------------------------
+# Session state (SAFE)
+# -----------------------------
+if "jwt" not in st.session_state:
+    st.session_state.jwt = None
 
 if "ws" not in st.session_state:
     st.session_state.ws = None
@@ -19,106 +22,103 @@ if "ws" not in st.session_state:
 if "connected" not in st.session_state:
     st.session_state.connected = False
 
-if "error" not in st.session_state:
-    st.session_state.error = None
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+if "ws_queue" not in st.session_state:
+    st.session_state.ws_queue = queue.Queue()
 
 
-# ----------------------------
-# WebSocket helpers
-# ----------------------------
-def ws_is_open(ws):
-    try:
-        return ws and ws.sock and ws.sock.connected
-    except Exception:
-        return False
+# -----------------------------
+# WebSocket listener (NO Streamlit calls)
+# -----------------------------
+def listen_ws(ws, q):
+    while True:
+        try:
+            msg = ws.recv()
+            q.put(json.loads(msg))
+        except Exception:
+            break
 
 
-def on_message(ws, message):
-    """
-    Callback when a message is received from the server.
-    Messages are appended to session_state and UI will show them on next rerun.
-    """
-    try:
-        data = json.loads(message)
-        room = data.get("room", "unknown")
-        sender = data.get("sender", "unknown")
-        msg = data.get("message", "")
-        st.session_state.messages.append(f"{sender} [{room}]: {msg}")
-    except Exception as e:
-        st.session_state.messages.append(f"Malformed message: {message}")
-    st.experimental_rerun()
+# -----------------------------
+# UI
+# -----------------------------
+st.title("💬 Chat App")
+
+with st.sidebar:
+    st.subheader("Login")
+
+    username = st.text_input("Username")
+    password = st.text_input("Password", type="password")
+
+    if st.button("Login"):
+        res = requests.post(
+            f"{API_BASE}/auth/login",
+            params={
+                "username": username,
+                "password": password,
+            },
+        )
+
+        if res.status_code == 200:
+            st.session_state.jwt = res.json()["access_token"]
+            st.success("Logged in")
+        else:
+            st.error(res.text)
+
+    st.divider()
+
+    if st.button("Connect WebSocket"):
+        if not st.session_state.jwt:
+            st.error("Login first")
+        else:
+            ws = websocket.WebSocket()
+            ws.connect(
+                WS_URL,
+                header=[f"Authorization: Bearer {st.session_state.jwt}"],
+            )
+
+            st.session_state.ws = ws
+            st.session_state.connected = True
+
+            threading.Thread(
+                target=listen_ws,
+                args=(ws, st.session_state.ws_queue),
+                daemon=True,
+            ).start()
+
+            st.success("Connected")
 
 
-def on_error(ws, error):
-    st.session_state.error = f"WebSocket error: {error}"
-    st.session_state.connected = False
-    st.experimental_rerun()
-
-
-def on_close(ws, close_status_code, close_msg):
-    st.session_state.connected = False
-    st.session_state.messages.append("🔴 Disconnected from server")
-    st.experimental_rerun()
-
-
-def connect_ws(token, room):
-    """
-    Connect to WebSocket with JWT token and room name.
-    """
-    headers = [f"Authorization: Bearer {token}"]
-    ws = websocket.WebSocketApp(
-        f"ws://127.0.0.1:8000/chat/ws?room={room}",
-        header=headers,
-        on_message=on_message,
-        on_error=on_error,
-        on_close=on_close,
+# -----------------------------
+# Pull WS messages safely
+# -----------------------------
+while not st.session_state.ws_queue.empty():
+    data = st.session_state.ws_queue.get()
+    st.session_state.messages.append(
+        f"{data.get('sender')}: {data.get('content')}"
     )
 
-    thread = threading.Thread(target=ws.run_forever, daemon=True)
-    thread.start()
-    return ws
 
-
-# ----------------------------
-# UI Elements
-# ----------------------------
-token = st.text_input("JWT Token", type="password")
-room = st.text_input("Room", value="general")
-
-# Connect button
-if st.button("Connect"):
-    if token.strip():
-        st.session_state.ws = connect_ws(token.strip(), room.strip())
-        st.session_state.connected = True
-        st.session_state.messages.append(f"🟢 Connected to room '{room.strip()}'")
-    else:
-        st.warning("Please provide a JWT token")
-
-st.divider()
-
-# Input for sending message
-message = st.text_input("Message")
-
-if st.button("Send"):
-    ws = st.session_state.get("ws")
-    if not st.session_state.connected or not ws_is_open(ws):
-        st.error("WebSocket is not connected. Please reconnect.")
-    elif message.strip():
-        try:
-            # Send message to backend
-            ws.send(message.strip())
-            # Optimistic UI update
-            st.session_state.messages.append(f"You [{room.strip()}]: {message.strip()}")
-        except Exception as e:
-            st.error(f"Failed to send message: {e}")
-
-st.divider()
-
-# Display chat messages
-st.subheader("Chat Messages")
+# -----------------------------
+# Chat display (NO fixed height)
+# -----------------------------
 for msg in st.session_state.messages:
     st.write(msg)
 
-# Show errors if any
-if st.session_state.error:
-    st.error(st.session_state.error)
+
+# -----------------------------
+# Send message
+# -----------------------------
+msg = st.text_input("Message")
+
+if st.button("Send"):
+    if not st.session_state.connected:
+        st.error("Not connected")
+    else:
+        st.session_state.ws.send(
+            json.dumps({"content": msg})
+        )
+        st.session_state.messages.append(f"You: {msg}")
+        st.rerun()
